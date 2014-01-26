@@ -233,10 +233,10 @@ class Server implements ResourceControllerInterface,
      *
      * @ingroup oauth2_section_4
      */
-    public function handleAuthorizeRequest(RequestInterface $request, ResponseInterface $response, $is_authorized, $user_id = null)
+    public function handleAuthorizeRequest(RequestInterface $request, ResponseInterface $response, $is_authorized, $user_id = null, $json_response = false)
     {
         $this->response = $response;
-        $this->getAuthorizeController()->handleAuthorizeRequest($request, $this->response, $is_authorized, $user_id);
+        $this->getAuthorizeController()->handleAuthorizeRequest($request, $this->response, $is_authorized, $user_id, $json_response);
 
         return $this->response;
     }
