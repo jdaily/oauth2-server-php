@@ -4,6 +4,12 @@ namespace OAuth2;
 
 use OAuth2\Controller\ResourceControllerInterface;
 use OAuth2\Controller\ResourceController;
+use OAuth2\OpenID\Controller\UserInfoControllerInterface;
+use OAuth2\OpenID\Controller\UserInfoController;
+use OAuth2\OpenID\Controller\AuthorizeController as OpenIDAuthorizeController;
+use OAuth2\OpenID\ResponseType\AuthorizationCode as OpenIDAuthorizationCodeResponseType;
+use OAuth2\OpenID\Storage\AuthorizationCodeInterface as OpenIDAuthorizationCodeInterface;
+use OAuth2\OpenID\GrantType\AuthorizationCode as OpenIDAuthorizationCodeGrantType;
 use OAuth2\Controller\AuthorizeControllerInterface;
 use OAuth2\Controller\AuthorizeController;
 use OAuth2\Controller\TokenControllerInterface;
@@ -13,7 +19,9 @@ use OAuth2\ClientAssertionType\HttpBasic;
 use OAuth2\ResponseType\ResponseTypeInterface;
 use OAuth2\ResponseType\AuthorizationCode as AuthorizationCodeResponseType;
 use OAuth2\ResponseType\AccessToken;
-use OAuth2\ResponseType\CryptoToken;
+use OAuth2\ResponseType\JwtAccessToken;
+use OAuth2\OpenID\ResponseType\IdToken;
+use OAuth2\OpenID\ResponseType\IdTokenToken;
 use OAuth2\TokenType\TokenTypeInterface;
 use OAuth2\TokenType\Bearer;
 use OAuth2\GrantType\GrantTypeInterface;
@@ -21,8 +29,8 @@ use OAuth2\GrantType\UserCredentials;
 use OAuth2\GrantType\ClientCredentials;
 use OAuth2\GrantType\RefreshToken;
 use OAuth2\GrantType\AuthorizationCode;
-use OAuth2\Storage\CryptoToken as CryptoTokenStorage;
-use OAuth2\Storage\CryptoTokenInterface;
+use OAuth2\Storage\JwtAccessToken as JwtAccessTokenStorage;
+use OAuth2\Storage\JwtAccessTokenInterface;
 
 /**
 * Server class for OAuth2
@@ -34,7 +42,8 @@ use OAuth2\Storage\CryptoTokenInterface;
 */
 class Server implements ResourceControllerInterface,
     AuthorizeControllerInterface,
-    TokenControllerInterface
+    TokenControllerInterface,
+    UserInfoControllerInterface
 {
     // misc properties
     protected $response;
@@ -45,6 +54,7 @@ class Server implements ResourceControllerInterface,
     protected $authorizeController;
     protected $tokenController;
     protected $resourceController;
+    protected $userInfoController;
 
     // config classes
     protected $grantTypes;
@@ -60,32 +70,29 @@ class Server implements ResourceControllerInterface,
         'client' => 'OAuth2\Storage\ClientInterface',
         'refresh_token' => 'OAuth2\Storage\RefreshTokenInterface',
         'user_credentials' => 'OAuth2\Storage\UserCredentialsInterface',
+        'user_claims' => 'OAuth2\OpenID\Storage\UserClaimsInterface',
         'public_key' => 'OAuth2\Storage\PublicKeyInterface',
         'jwt_bearer' => 'OAuth2\Storage\JWTBearerInterface',
         'scope' => 'OAuth2\Storage\ScopeInterface',
     );
+
     protected $responseTypeMap = array(
         'token' => 'OAuth2\ResponseType\AccessTokenInterface',
         'code' => 'OAuth2\ResponseType\AuthorizationCodeInterface',
+        'id_token' => 'OAuth2\OpenID\ResponseType\IdTokenInterface',
+        'id_token token' => 'OAuth2\OpenID\ResponseType\IdTokenTokenInterface',
     );
 
     /**
-     * @param mixed $storage
-     * array - array of Objects to implement storage
-     * OAuth2\Storage object implementing all required storage types (ClientCredentialsInterface and AccessTokenInterface as a minimum)
-     * @param array $config
-     * specify a different token lifetime, token header name, etc
-     * @param array $grantTypes
-     * An array of OAuth2\GrantType\GrantTypeInterface to use for granting access tokens
-     * @param array $responseTypes
-     * Response types to use.  array keys should be "code" and and "token" for
-     * Access Token and Authorization Code response types
-     * @param OAuth2\TokenType\TokenTypeInterface $tokenType
-     * The token type object to use. Valid token types are "bearer" and "mac"
-     * @param OAuth2\ScopeInterface $scopeUtil
-     * The scope utility class to use to validate scope
-     * @param OAuth2\ClientAssertionType\ClientAssertionTypeInterface $clientAssertionType
-     * The method in which to verify the client identity.  Default is HttpBasic
+     * @param mixed                                                   $storage             (array or OAuth2\Storage) - single object or array of objects implementing the
+     *                                                                                     required storage types (ClientCredentialsInterface and AccessTokenInterface as a minimum)
+     * @param array                                                   $config              specify a different token lifetime, token header name, etc
+     * @param array                                                   $grantTypes          An array of OAuth2\GrantType\GrantTypeInterface to use for granting access tokens
+     * @param array                                                   $responseTypes       Response types to use.  array keys should be "code" and and "token" for
+     *                                                                                     Access Token and Authorization Code response types
+     * @param OAuth2\TokenType\TokenTypeInterface                     $tokenType           The token type object to use. Valid token types are "bearer" and "mac"
+     * @param OAuth2\ScopeInterface                                   $scopeUtil           The scope utility class to use to validate scope
+     * @param OAuth2\ClientAssertionType\ClientAssertionTypeInterface $clientAssertionType The method in which to verify the client identity.  Default is HttpBasic
      *
      * @ingroup oauth2_section_7
      */
@@ -99,8 +106,10 @@ class Server implements ResourceControllerInterface,
 
         // merge all config values.  These get passed to our controller objects
         $this->config = array_merge(array(
-            'use_crypto_tokens'        => false,
+            'use_jwt_access_tokens'        => false,
             'store_encrypted_token_string' => true,
+            'use_openid_connect'       => false,
+            'id_lifetime'              => 3600,
             'access_lifetime'          => 3600,
             'www_realm'                => 'Service',
             'token_param_name'         => 'access_token',
@@ -116,9 +125,11 @@ class Server implements ResourceControllerInterface,
         foreach ($grantTypes as $key => $grantType) {
             $this->addGrantType($grantType, $key);
         }
+
         foreach ($responseTypes as $key => $responseType) {
             $this->addResponseType($responseType, $key);
         }
+
         $this->tokenType = $tokenType;
         $this->scopeUtil = $scopeUtil;
         $this->clientAssertionType = $clientAssertionType;
@@ -151,6 +162,15 @@ class Server implements ResourceControllerInterface,
         return $this->resourceController;
     }
 
+    public function getUserInfoController()
+    {
+        if (is_null($this->userInfoController)) {
+            $this->userInfoController = $this->createDefaultUserInfoController();
+        }
+
+        return $this->userInfoController;
+    }
+
     /**
      * every getter deserves a setter
      */
@@ -173,6 +193,37 @@ class Server implements ResourceControllerInterface,
     public function setResourceController(ResourceControllerInterface $resourceController)
     {
         $this->resourceController = $resourceController;
+    }
+
+    /**
+     * every getter deserves a setter
+     */
+    public function setUserInfoController(UserInfoControllerInterface $userInfoController)
+    {
+        $this->userInfoController = $userInfoController;
+    }
+
+    /**
+     * Return claims about the authenticated end-user.
+     * This would be called from the "/UserInfo" endpoint as defined in the spec.
+     *
+     * @param $request - OAuth2\RequestInterface
+     * Request object to grant access token
+     *
+     * @param $response - OAuth2\ResponseInterface
+     * Response object containing error messages (failure) or user claims (success)
+     *
+     * @throws InvalidArgumentException
+     * @throws LogicException
+     *
+     * @see http://openid.net/specs/openid-connect-core-1_0.html#UserInfo
+     */
+    public function handleUserInfoRequest(RequestInterface $request, ResponseInterface $response = null)
+    {
+        $this->response = is_null($response) ? new Response() : $response;
+        $this->getUserInfoController()->handleUserInfoRequest($request, $this->response);
+
+        return $this->response;
     }
 
     /**
@@ -295,7 +346,7 @@ class Server implements ResourceControllerInterface,
         if (is_string($key)) {
             $this->grantTypes[$key] = $grantType;
         } else {
-            $this->grantTypes[] = $grantType;
+            $this->grantTypes[$grantType->getQuerystringIdentifier()] = $grantType;
         }
 
         // persist added grant type down to TokenController
@@ -318,10 +369,21 @@ class Server implements ResourceControllerInterface,
     {
         // if explicitly set to a valid key, do not "magically" set below
         if (isset($this->storageMap[$key])) {
-            if (!$storage instanceof $this->storageMap[$key]) {
+            if (!is_null($storage) && !$storage instanceof $this->storageMap[$key]) {
                 throw new \InvalidArgumentException(sprintf('storage of type "%s" must implement interface "%s"', $key, $this->storageMap[$key]));
             }
             $this->storages[$key] = $storage;
+
+            // special logic to handle "client" and "client_credentials" strangeness
+            if ($key === 'client' && !isset($this->storages['client_credentials'])) {
+                if ($storage instanceof \OAuth2\Storage\ClientCredentialsInterface) {
+                    $this->storages['client_credentials'] = $storage;
+                }
+            } elseif ($key === 'client_credentials' && !isset($this->storages['client'])) {
+                if ($storage instanceof \OAuth2\Storage\ClientInterface) {
+                    $this->storages['client'] = $storage;
+                }
+            }
         } elseif (!is_null($key) && !is_numeric($key)) {
             throw new \InvalidArgumentException(sprintf('unknown storage key "%s", must be one of [%s]', $key, implode(', ', array_keys($this->storageMap))));
         } else {
@@ -341,6 +403,8 @@ class Server implements ResourceControllerInterface,
 
     public function addResponseType(ResponseTypeInterface $responseType, $key = null)
     {
+        $key = $this->normalizeResponseType($key);
+
         if (isset($this->responseTypeMap[$key])) {
             if (!$responseType instanceof $this->responseTypeMap[$key]) {
                 throw new \InvalidArgumentException(sprintf('responseType of type "%s" must implement interface "%s"', $key, $this->responseTypeMap[$key]));
@@ -389,7 +453,18 @@ class Server implements ResourceControllerInterface,
         if (0 == count($this->responseTypes)) {
             $this->responseTypes = $this->getDefaultResponseTypes();
         }
+        if ($this->config['use_openid_connect'] && !isset($this->responseTypes['id_token'])) {
+            $this->responseTypes['id_token'] = $this->createDefaultIdTokenResponseType();
+            if ($this->config['allow_implicit']) {
+                $this->responseTypes['id_token token'] = $this->createDefaultIdTokenTokenResponseType();
+            }
+        }
+
         $config = array_intersect_key($this->config, array_flip(explode(' ', 'allow_implicit enforce_state require_exact_redirect_uri')));
+
+        if ($this->config['use_openid_connect']) {
+            return new OpenIDAuthorizeController($this->storages['client'], $this->responseTypes, $config, $this->getScopeUtil());
+        }
 
         return new AuthorizeController($this->storages['client'], $this->responseTypes, $config, $this->getScopeUtil());
     }
@@ -418,24 +493,20 @@ class Server implements ResourceControllerInterface,
             throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\ClientInterface to use the token server");
         }
 
-        if ($this->config['use_crypto_tokens']) {
-            $accessTokenResponseType = $this->getCryptoTokenResponseType();
-        } else {
-            $accessTokenResponseType = $this->getAccessTokenResponseType();
-        }
+        $accessTokenResponseType = $this->getAccessTokenResponseType();
 
         return new TokenController($accessTokenResponseType, $this->storages['client'], $this->grantTypes, $this->clientAssertionType, $this->getScopeUtil());
     }
 
     protected function createDefaultResourceController()
     {
-        if ($this->config['use_crypto_tokens']) {
-            // overwrites access token storage with crypto token storage if "use_crypto_tokens" is set
-            if (!isset($this->storages['access_token']) || !$this->storages['access_token'] instanceof CryptoTokenInterface) {
-                $this->storages['access_token'] = $this->createDefaultCryptoTokenStorage();
+        if ($this->config['use_jwt_access_tokens']) {
+            // overwrites access token storage with crypto token storage if "use_jwt_access_tokens" is set
+            if (!isset($this->storages['access_token']) || !$this->storages['access_token'] instanceof JwtAccessTokenInterface) {
+                $this->storages['access_token'] = $this->createDefaultJwtAccessTokenStorage();
             }
         } elseif (!isset($this->storages['access_token'])) {
-            throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\AccessTokenInterface or use CryptoTokens to use the resource server");
+            throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\AccessTokenInterface or use JwtAccessTokens to use the resource server");
         }
 
         if (!$this->tokenType) {
@@ -445,6 +516,30 @@ class Server implements ResourceControllerInterface,
         $config = array_intersect_key($this->config, array('www_realm' => ''));
 
         return new ResourceController($this->tokenType, $this->storages['access_token'], $config, $this->getScopeUtil());
+    }
+
+    protected function createDefaultUserInfoController()
+    {
+        if ($this->config['use_jwt_access_tokens']) {
+            // overwrites access token storage with crypto token storage if "use_jwt_access_tokens" is set
+            if (!isset($this->storages['access_token']) || !$this->storages['access_token'] instanceof JwtAccessTokenInterface) {
+                $this->storages['access_token'] = $this->createDefaultJwtAccessTokenStorage();
+            }
+        } elseif (!isset($this->storages['access_token'])) {
+            throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\AccessTokenInterface or use JwtAccessTokens to use the UserInfo server");
+        }
+
+        if (!isset($this->storages['user_claims'])) {
+            throw new \LogicException("You must supply a storage object implementing OAuth2\OpenID\Storage\UserClaimsInterface to use the UserInfo server");
+        }
+
+        if (!$this->tokenType) {
+            $this->tokenType = $this->getDefaultTokenType();
+        }
+
+        $config = array_intersect_key($this->config, array('www_realm' => ''));
+
+        return new UserInfoController($this->tokenType, $this->storages['access_token'], $this->storages['user_claims'], $config, $this->getScopeUtil());
     }
 
     protected function getDefaultTokenType()
@@ -459,16 +554,26 @@ class Server implements ResourceControllerInterface,
         $responseTypes = array();
 
         if ($this->config['allow_implicit']) {
-            if ($this->config['use_crypto_tokens']) {
-                $responseTypes['token'] = $this->getCryptoTokenResponseType();
-            } elseif (isset($this->storages['access_token'])) {
-                $responseTypes['token'] = $this->getAccessTokenResponseType();
+            $responseTypes['token'] = $this->getAccessTokenResponseType();
+        }
+
+        if ($this->config['use_openid_connect']) {
+            $responseTypes['id_token'] = $this->getIdTokenResponseType();
+            if ($this->config['allow_implicit']) {
+                $responseTypes['id_token token'] = $this->getIdTokenTokenResponseType();
             }
         }
 
         if (isset($this->storages['authorization_code'])) {
             $config = array_intersect_key($this->config, array_flip(explode(' ', 'enforce_redirect auth_code_lifetime')));
-            $responseTypes['code'] = new AuthorizationCodeResponseType($this->storages['authorization_code'], $config);
+            if ($this->config['use_openid_connect']) {
+                if (!$this->storages['authorization_code'] instanceof OpenIDAuthorizationCodeInterface) {
+                    throw new \LogicException("Your authorization_code storage must implement OAuth2\OpenID\Storage\AuthorizationCodeInterface to work when 'use_openid_connect' is true");
+                }
+                $responseTypes['code'] = new OpenIDAuthorizationCodeResponseType($this->storages['authorization_code'], $config);
+            } else {
+                $responseTypes['code'] = new AuthorizationCodeResponseType($this->storages['authorization_code'], $config);
+            }
         }
 
         if (count($responseTypes) == 0) {
@@ -497,7 +602,14 @@ class Server implements ResourceControllerInterface,
         }
 
         if (isset($this->storages['authorization_code'])) {
-            $grantTypes['authorization_code'] = new AuthorizationCode($this->storages['authorization_code']);
+            if ($this->config['use_openid_connect']) {
+                if (!$this->storages['authorization_code'] instanceof OpenIDAuthorizationCodeInterface) {
+                    throw new \LogicException("Your authorization_code storage must implement OAuth2\OpenID\Storage\AuthorizationCodeInterface to work when 'use_openid_connect' is true");
+                }
+                $grantTypes['authorization_code'] = new OpenIDAuthorizationCodeGrantType($this->storages['authorization_code']);
+            } else {
+                $grantTypes['authorization_code'] = new AuthorizationCode($this->storages['authorization_code']);
+            }
         }
 
         if (count($grantTypes) == 0) {
@@ -513,22 +625,35 @@ class Server implements ResourceControllerInterface,
             return $this->responseTypes['token'];
         }
 
+        if ($this->config['use_jwt_access_tokens']) {
+            return $this->createDefaultJwtAccessTokenResponseType();
+        }
+
         return $this->createDefaultAccessTokenResponseType();
     }
 
-    protected function getCryptoTokenResponseType()
+    protected function getIdTokenResponseType()
     {
-        if (isset($this->responseTypes['token'])) {
-            return $this->responseTypes['token'];
+        if (isset($this->responseTypes['id_token'])) {
+            return $this->responseTypes['id_token'];
         }
 
-        return $this->createDefaultCryptoTokenResponseType();
+        return $this->createDefaultIdTokenResponseType();
+    }
+
+    protected function getIdTokenTokenResponseType()
+    {
+        if (isset($this->responseTypes['id_token token'])) {
+            return $this->responseTypes['id_token token'];
+        }
+
+        return $this->createDefaultIdTokenTokenResponseType();
     }
 
     /**
      * For Resource Controller
      */
-    protected function createDefaultCryptoTokenStorage()
+    protected function createDefaultJwtAccessTokenStorage()
     {
         if (!isset($this->storages['public_key'])) {
             throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\PublicKeyInterface to use crypto tokens");
@@ -538,13 +663,13 @@ class Server implements ResourceControllerInterface,
             $tokenStorage = $this->storages['access_token'];
         }
         // wrap the access token storage as required.
-        return new CryptoTokenStorage($this->storages['public_key'], $tokenStorage);
+        return new JwtAccessTokenStorage($this->storages['public_key'], $tokenStorage);
     }
 
     /**
      * For Authorize and Token Controllers
      */
-    protected function createDefaultCryptoTokenResponseType()
+    protected function createDefaultJwtAccessTokenResponseType()
     {
         if (!isset($this->storages['public_key'])) {
             throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\PublicKeyInterface to use crypto tokens");
@@ -562,7 +687,7 @@ class Server implements ResourceControllerInterface,
 
         $config = array_intersect_key($this->config, array_flip(explode(' ', 'store_encrypted_token_string')));
 
-        return new CryptoToken($this->storages['public_key'], $tokenStorage, $refreshStorage, $config);
+        return new JwtAccessToken($this->storages['public_key'], $tokenStorage, $refreshStorage, $config);
     }
 
     protected function createDefaultAccessTokenResponseType()
@@ -580,6 +705,37 @@ class Server implements ResourceControllerInterface,
         $config['token_type'] = $this->tokenType ? $this->tokenType->getTokenType() :  $this->getDefaultTokenType()->getTokenType();
 
         return new AccessToken($this->storages['access_token'], $refreshStorage, $config);
+    }
+
+    protected function createDefaultIdTokenResponseType()
+    {
+        if (!isset($this->storages['user_claims'])) {
+            throw new \LogicException("You must supply a storage object implementing OAuth2\OpenID\Storage\UserClaimsInterface to use openid connect");
+        }
+        if (!isset($this->storages['public_key'])) {
+            throw new \LogicException("You must supply a storage object implementing OAuth2\Storage\PublicKeyInterface to use openid connect");
+        }
+
+        $config = array_intersect_key($this->config, array_flip(explode(' ', 'issuer id_lifetime')));
+
+        return new IdToken($this->storages['user_claims'], $this->storages['public_key'], $config);
+    }
+
+    protected function createDefaultIdTokenTokenResponseType()
+    {
+        return new IdTokenToken($this->getAccessTokenResponseType(), $this->getIdTokenResponseType());
+    }
+
+    protected function normalizeResponseType($name)
+    {
+        // for multiple-valued response types - make them alphabetical
+        if (!empty($name) && false !== strpos($name, ' ')) {
+            $types = explode(' ', $name);
+            sort($types);
+            $name = implode(' ', $types);
+        }
+
+        return $name;
     }
 
     public function getResponse()
@@ -614,6 +770,9 @@ class Server implements ResourceControllerInterface,
 
     public function getResponseType($name)
     {
+        // for multiple-valued response types - make them alphabetical
+        $name = $this->normalizeResponseType($name);
+
         return isset($this->responseTypes[$name]) ? $this->responseTypes[$name] : null;
     }
 

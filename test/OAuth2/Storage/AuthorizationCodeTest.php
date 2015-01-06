@@ -5,10 +5,10 @@ namespace OAuth2\Storage;
 class AuthorizationCodeTest extends BaseTest
 {
     /** @dataProvider provideStorage */
-    public function testGetAuthorizationCode(AuthorizationCodeInterface $storage = null)
+    public function testGetAuthorizationCode(AuthorizationCodeInterface $storage)
     {
         if ($storage instanceof NullStorage) {
-            $this->markTestSkipped('Skipped Storage: ' . $storage);
+            $this->markTestSkipped('Skipped Storage: ' . $storage->getMessage());
 
             return;
         }
@@ -23,10 +23,10 @@ class AuthorizationCodeTest extends BaseTest
     }
 
     /** @dataProvider provideStorage */
-    public function testSetAuthorizationCode(AuthorizationCodeInterface $storage = null)
+    public function testSetAuthorizationCode(AuthorizationCodeInterface $storage)
     {
         if ($storage instanceof NullStorage) {
-            $this->markTestSkipped('Skipped Storage: ' . $storage);
+            $this->markTestSkipped('Skipped Storage: ' . $storage->getMessage());
 
             return;
         }
@@ -70,5 +70,32 @@ class AuthorizationCodeTest extends BaseTest
         $this->assertEquals($code['user_id'], 'SOMEOTHERID');
         $this->assertEquals($code['redirect_uri'], 'http://example.org');
         $this->assertEquals($code['expires'], $expires);
+    }
+
+        /** @dataProvider provideStorage */
+    public function testExpireAccessToken(AccessTokenInterface $storage)
+    {
+        if ($storage instanceof NullStorage) {
+            $this->markTestSkipped('Skipped Storage: ' . $storage->getMessage());
+
+            return;
+        }
+
+        // create a valid code
+        $expires = time() + 20;
+        $success = $storage->setAuthorizationCode('code-to-expire', 'client ID', 'SOMEUSERID', 'http://example.com', time() + 20);
+        $this->assertTrue($success);
+
+        // verify the new code exists
+        $code = $storage->getAuthorizationCode('code-to-expire');
+        $this->assertNotNull($code);
+
+        $this->assertArrayHasKey('authorization_code', $code);
+        $this->assertEquals($code['authorization_code'], 'code-to-expire');
+
+        // now expire the code and ensure it's no longer available
+        $storage->expireAuthorizationCode('code-to-expire');
+        $code = $storage->getAuthorizationCode('code-to-expire');
+        $this->assertFalse($code);
     }
 }

@@ -60,7 +60,7 @@ class ResourceControllerTest extends \PHPUnit_Framework_TestCase
 
         $this->assertEquals($response->getStatusCode(), 400);
         $this->assertEquals($response->getParameter('error'), 'invalid_request');
-        $this->assertEquals($response->getParameter('error_description'), 'When putting the token in the body, the method must be POST');
+        $this->assertEquals($response->getParameter('error_description'), 'When putting the token in the body, the method must be POST or PUT');
     }
 
     public function testInvalidContentType()
@@ -100,7 +100,7 @@ class ResourceControllerTest extends \PHPUnit_Framework_TestCase
         $this->assertFalse($allow);
 
         $this->assertEquals($response->getStatusCode(), 401);
-        $this->assertEquals($response->getParameter('error'), 'invalid_token');
+        $this->assertEquals($response->getParameter('error'), 'expired_token');
         $this->assertEquals($response->getParameter('error_description'), 'The access token provided has expired');
     }
 
@@ -132,8 +132,8 @@ class ResourceControllerTest extends \PHPUnit_Framework_TestCase
         $this->assertFalse($allow);
 
         $this->assertEquals($response->getStatusCode(), 401);
-        $this->assertEquals($response->getParameter('error'), 'invalid_token');
-        $this->assertEquals($response->getParameter('error_description'), 'Malformed token (missing "expires" or "client_id")');
+        $this->assertEquals($response->getParameter('error'), 'malformed_token');
+        $this->assertEquals($response->getParameter('error_description'), 'Malformed token (missing "expires")');
     }
 
     public function testValidToken()

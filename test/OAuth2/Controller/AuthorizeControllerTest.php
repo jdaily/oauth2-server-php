@@ -203,7 +203,7 @@ class AuthorizeControllerTest extends \PHPUnit_Framework_TestCase
         $request = new Request(array(
             'client_id'     => 'Test Client ID with Redirect Uri Parts', // valid client id
             'response_type' => 'code',
-            'redirect_uri'  => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth',
+            'redirect_uri'  => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth&test=true',
             'state'         => 'xyz',
         ));
 
@@ -221,7 +221,7 @@ class AuthorizeControllerTest extends \PHPUnit_Framework_TestCase
         $request = new Request(array(
             'client_id' => 'Test Client ID with Redirect Uri Parts', // valid client id
             'response_type' => 'code',
-            'redirect_uri' => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth&hereisa=querystring',
+            'redirect_uri' => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth&test=true&hereisa=querystring',
         ));
 
         $server->handleAuthorizeRequest($request, $response = new Response(), true);
@@ -239,7 +239,7 @@ class AuthorizeControllerTest extends \PHPUnit_Framework_TestCase
         $request = new Request(array(
             'client_id'     => 'Test Client ID with Redirect Uri Parts', // valid client id
             'response_type' => 'code',
-            'redirect_uri'  => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth&hereisa=querystring',
+            'redirect_uri'  => 'http://user:pass@brentertainment.com:2222/authorize/cb?auth_type=oauth&test=true&hereisa=querystring',
             'state'         => 'xyz',
         ));
 
@@ -354,6 +354,11 @@ class AuthorizeControllerTest extends \PHPUnit_Framework_TestCase
         $this->assertNotNull($query);
         $this->assertArrayHasKey('code', $query);
 
+        // ensure no id_token was saved, since the openid scope wasn't requested
+        $storage = $server->getStorage('authorization_code');
+        $code = $storage->getAuthorizationCode($query['code']);
+        $this->assertTrue(empty($code['id_token']));
+
         // ensure no error was returned
         $this->assertFalse(isset($query['error']));
         $this->assertFalse(isset($query['error_description']));
@@ -409,6 +414,47 @@ class AuthorizeControllerTest extends \PHPUnit_Framework_TestCase
         $this->assertFalse(isset($parmas['fake']));
         $this->assertArrayHasKey('state', $query);
         $this->assertEquals($query['state'], 'test');
+    }
+
+    public function testSuccessfulOpenidConnectRequest()
+    {
+        $server = $this->getTestServer(array(
+            'use_openid_connect' => true,
+            'issuer' => 'bojanz',
+        ));
+
+        $request = new Request(array(
+            'client_id'     => 'Test Client ID',
+            'redirect_uri'  => 'http://adobe.com',
+            'response_type' => 'code',
+            'state'         => 'xyz',
+            'scope'         => 'openid',
+        ));
+        $server->handleAuthorizeRequest($request, $response = new Response(), true);
+
+        $this->assertEquals($response->getStatusCode(), 302);
+        $location = $response->getHttpHeader('Location');
+        $parts = parse_url($location);
+        parse_str($parts['query'], $query);
+
+        $location = $response->getHttpHeader('Location');
+        $parts = parse_url($location);
+        $this->assertArrayHasKey('query', $parts);
+        $this->assertFalse(isset($parts['fragment']));
+
+        // assert fragment is in "application/x-www-form-urlencoded" format
+        parse_str($parts['query'], $query);
+        $this->assertNotNull($query);
+        $this->assertArrayHasKey('code', $query);
+
+        // ensure no error was returned
+        $this->assertFalse(isset($query['error']));
+        $this->assertFalse(isset($query['error_description']));
+
+        // confirm that the id_token has been created.
+        $storage = $server->getStorage('authorization_code');
+        $code = $storage->getAuthorizationCode($query['code']);
+        $this->assertTrue(!empty($code['id_token']));
     }
 
     public function testCreateController()

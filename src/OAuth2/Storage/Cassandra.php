@@ -1,20 +1,32 @@
 <?php
 
 namespace OAuth2\Storage;
+
 use phpcassa\ColumnFamily;
 use phpcassa\ColumnSlice;
 use phpcassa\Connection\ConnectionPool;
+use OAuth2\OpenID\Storage\AuthorizationCodeInterface as OpenIDAuthorizationCodeInterface;
 
 /**
- * cassandra storage for all storage types, requires phpcassa
+ * Cassandra storage for all storage types
  *
  * To use, install "thobbs/phpcassa" via composer
+ * <code>
+ *  composer require thobbs/phpcassa:dev-master
+ * </code>
  *
- * Register client:
+ * Once this is done, instantiate the
+ * <code>
+ *  $cassandra = new \phpcassa\Connection\ConnectionPool('oauth2_server', array('127.0.0.1:9160'));
+ * </code>
+ *
+ * Then, register the storage client:
  * <code>
  *  $storage = new OAuth2\Storage\Cassandra($cassandra);
  *  $storage->setClientDetails($client_id, $client_secret, $redirect_uri);
  * </code>
+ *
+ * @see test/lib/OAuth2/Storage/Bootstrap::getCassandraStorage
  */
 class Cassandra implements AuthorizationCodeInterface,
     AccessTokenInterface,
@@ -22,7 +34,8 @@ class Cassandra implements AuthorizationCodeInterface,
     UserCredentialsInterface,
     RefreshTokenInterface,
     JwtBearerInterface,
-    ScopeInterface
+    ScopeInterface,
+    OpenIDAuthorizationCodeInterface
 {
 
     private $cache;
@@ -37,7 +50,7 @@ class Cassandra implements AuthorizationCodeInterface,
      * Cassandra Storage! uses phpCassa
      *
      * @param \phpcassa\ConnectionPool $cassandra
-     * @param array $config
+     * @param array                    $config
      */
     public function __construct($connection = array(), array $config = array())
     {
@@ -99,14 +112,14 @@ class Cassandra implements AuthorizationCodeInterface,
                 $seconds = $expire - time();
                 // __data key set as C* requires a field, note: max TTL can only be 630720000 seconds
                 $cf->insert($key, array('__data' => $str), null, $seconds);
-            } catch(\Exception $e) {
+            } catch (\Exception $e) {
                 return false;
             }
         } else {
             try {
                 // __data key set as C* requires a field
                 $cf->insert($key, array('__data' => $str));
-            } catch(\Exception $e) {
+            } catch (\Exception $e) {
                 return false;
             }
         }
@@ -122,7 +135,7 @@ class Cassandra implements AuthorizationCodeInterface,
         try {
             // __data key set as C* requires a field
             $cf->remove($key, array('__data'));
-        } catch(\Exception $e) {
+        } catch (\Exception $e) {
             return false;
         }
 
@@ -135,11 +148,11 @@ class Cassandra implements AuthorizationCodeInterface,
         return $this->getValue($this->config['code_key'] . $code);
     }
 
-    public function setAuthorizationCode($authorization_code, $client_id, $user_id, $redirect_uri, $expires, $scope = null)
+    public function setAuthorizationCode($authorization_code, $client_id, $user_id, $redirect_uri, $expires, $scope = null, $id_token = null)
     {
         return $this->setValue(
             $this->config['code_key'] . $authorization_code,
-            compact('authorization_code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope'),
+            compact('authorization_code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope', 'id_token'),
             $expires
         );
     }
@@ -306,7 +319,10 @@ class Cassandra implements AuthorizationCodeInterface,
     /*JWTBearerInterface */
     public function getClientKey($client_id, $subject)
     {
-        $jwt = $this->getValue($this->config['jwt_key'] . $client_id);
+        if (!$jwt = $this->getValue($this->config['jwt_key'] . $client_id)) {
+            return false;
+        }
+
         if (isset($jwt['subject']) && $jwt['subject'] == $subject ) {
             return $jwt['key'];
         }
@@ -314,6 +330,15 @@ class Cassandra implements AuthorizationCodeInterface,
         return null;
     }
 
+    public function setClientKey($client_id, $key, $subject = null)
+    {
+        return $this->setValue($this->config['jwt_key'] . $client_id, array(
+            'key' => $key,
+            'subject' => $subject
+        ));
+    }
+
+    /*ScopeInterface */
     public function getClientScope($client_id)
     {
         if (!$clientDetails = $this->getClientDetails($client_id)) {
@@ -339,4 +364,3 @@ class Cassandra implements AuthorizationCodeInterface,
         throw new \Exception('setJti() for the Cassandra driver is currently unimplemented.');
     }
 }
-
