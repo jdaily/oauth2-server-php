@@ -1,9 +1,11 @@
 <?php
 
 namespace OAuth2\Storage;
+
 use phpcassa\ColumnFamily;
 use phpcassa\ColumnSlice;
 use phpcassa\Connection\ConnectionPool;
+use OAuth2\OpenID\Storage\AuthorizationCodeInterface as OpenIDAuthorizationCodeInterface;
 
 /**
  * Cassandra storage for all storage types
@@ -32,7 +34,8 @@ class Cassandra implements AuthorizationCodeInterface,
     UserCredentialsInterface,
     RefreshTokenInterface,
     JwtBearerInterface,
-    ScopeInterface
+    ScopeInterface,
+    OpenIDAuthorizationCodeInterface
 {
 
     private $cache;
@@ -47,7 +50,7 @@ class Cassandra implements AuthorizationCodeInterface,
      * Cassandra Storage! uses phpCassa
      *
      * @param \phpcassa\ConnectionPool $cassandra
-     * @param array $config
+     * @param array                    $config
      */
     public function __construct($connection = array(), array $config = array())
     {
@@ -109,14 +112,14 @@ class Cassandra implements AuthorizationCodeInterface,
                 $seconds = $expire - time();
                 // __data key set as C* requires a field, note: max TTL can only be 630720000 seconds
                 $cf->insert($key, array('__data' => $str), null, $seconds);
-            } catch(\Exception $e) {
+            } catch (\Exception $e) {
                 return false;
             }
         } else {
             try {
                 // __data key set as C* requires a field
                 $cf->insert($key, array('__data' => $str));
-            } catch(\Exception $e) {
+            } catch (\Exception $e) {
                 return false;
             }
         }
@@ -132,7 +135,7 @@ class Cassandra implements AuthorizationCodeInterface,
         try {
             // __data key set as C* requires a field
             $cf->remove($key, array('__data'));
-        } catch(\Exception $e) {
+        } catch (\Exception $e) {
             return false;
         }
 
@@ -145,11 +148,11 @@ class Cassandra implements AuthorizationCodeInterface,
         return $this->getValue($this->config['code_key'] . $code);
     }
 
-    public function setAuthorizationCode($authorization_code, $client_id, $user_id, $redirect_uri, $expires, $scope = null)
+    public function setAuthorizationCode($authorization_code, $client_id, $user_id, $redirect_uri, $expires, $scope = null, $id_token = null)
     {
         return $this->setValue(
             $this->config['code_key'] . $authorization_code,
-            compact('authorization_code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope'),
+            compact('authorization_code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope', 'id_token'),
             $expires
         );
     }
@@ -361,4 +364,3 @@ class Cassandra implements AuthorizationCodeInterface,
         throw new \Exception('setJti() for the Cassandra driver is currently unimplemented.');
     }
 }
-

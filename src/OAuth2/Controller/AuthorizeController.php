@@ -25,23 +25,19 @@ class AuthorizeController implements AuthorizeControllerInterface
     protected $scopeUtil;
 
     /**
-     * @param OAuth2\Storage\ClientInterface $clientStorage
-     * REQUIRED Instance of OAuth2\Storage\ClientInterface to retrieve client information
-     * @param array $responseTypes
-     * OPTIONAL Array of OAuth2\ResponseType\ResponseTypeInterface objects.  Valid array
-     * keys are "code" and "token"
-     * @param array $config
-     * OPTIONAL Configuration options for the server
-     * @code
-     * $config = array(
-     *   'allow_implicit' => false,            // if the controller should allow the "implicit" grant type
-     *   'enforce_state'  => true              // if the controller should require the "state" parameter
-     *   'require_exact_redirect_uri' => true, // if the controller should require an exact match on the "redirect_uri" parameter
-     *   'redirect_status_code' => 302,        // HTTP status code to use for redirect responses
-     * );
-     * @endcode
-     * @param OAuth2\ScopeInterface $scopeUtil
-     * OPTIONAL Instance of OAuth2\ScopeInterface to validate the requested scope
+     * @param OAuth2\Storage\ClientInterface $clientStorage REQUIRED Instance of OAuth2\Storage\ClientInterface to retrieve client information
+     * @param array                          $responseTypes OPTIONAL Array of OAuth2\ResponseType\ResponseTypeInterface objects.  Valid array
+     *                                                      keys are "code" and "token"
+     * @param array                          $config        OPTIONAL Configuration options for the server
+     *                                                      <code>
+     *                                                      $config = array(
+     *                                                      'allow_implicit' => false,            // if the controller should allow the "implicit" grant type
+     *                                                      'enforce_state'  => true              // if the controller should require the "state" parameter
+     *                                                      'require_exact_redirect_uri' => true, // if the controller should require an exact match on the "redirect_uri" parameter
+     *                                                      'redirect_status_code' => 302,        // HTTP status code to use for redirect responses
+     *                                                      );
+     *                                                      </code>
+     * @param OAuth2\ScopeInterface          $scopeUtil     OPTIONAL Instance of OAuth2\ScopeInterface to validate the requested scope
      */
     public function __construct(ClientInterface $clientStorage, array $responseTypes = array(), array $config = array(), ScopeInterface $scopeUtil = null)
     {
@@ -78,21 +74,18 @@ class AuthorizeController implements AuthorizeControllerInterface
             $registered_redirect_uri = $clientData['redirect_uri'];
         }
 
+        // the user declined access to the client's application
         if ($is_authorized === false) {
             $redirect_uri = $this->redirect_uri ?: $registered_redirect_uri;
-            $response->setRedirect($this->config['redirect_status_code'], $redirect_uri, $this->state, 'access_denied', "The user denied access to your application");
+            $this->setNotAuthorizedResponse($request, $response, $redirect_uri, $user_id);
 
             return;
         }
 
-        // @TODO: we should be explicit with this in the future
-        $params = array(
-            'scope'         => $this->scope,
-            'state'         => $this->state,
-            'client_id'     => $this->client_id,
-            'redirect_uri'  => $this->redirect_uri,
-            'response_type' => $this->response_type,
-        );
+        // build the parameters to set in the redirect URI
+        if (!$params = $this->buildAuthorizeParameters($request, $response, $user_id)) {
+            return;
+        }
 
         $authResult = $this->responseTypes[$this->response_type]->getAuthorizeResponse($params, $user_id);
 
@@ -106,6 +99,31 @@ class AuthorizeController implements AuthorizeControllerInterface
 
         // return redirect response
         $response->setRedirect($this->config['redirect_status_code'], $uri);
+    }
+
+    protected function setNotAuthorizedResponse(RequestInterface $request, ResponseInterface $response, $redirect_uri, $user_id = null)
+    {
+        $error = 'access_denied';
+        $error_message = 'The user denied access to your application';
+        $response->setRedirect($this->config['redirect_status_code'], $redirect_uri, $this->state, $error, $error_message);
+    }
+
+    /*
+     * We have made this protected so this class can be extended to add/modify
+     * these parameters
+     */
+    protected function buildAuthorizeParameters($request, $response, $user_id)
+    {
+        // @TODO: we should be explicit with this in the future
+        $params = array(
+            'scope'         => $this->scope,
+            'state'         => $this->state,
+            'client_id'     => $this->client_id,
+            'redirect_uri'  => $this->redirect_uri,
+            'response_type' => $this->response_type,
+        );
+
+        return $params;
     }
 
     public function validateAuthorizeRequest(RequestInterface $request, ResponseInterface $response)
@@ -168,7 +186,7 @@ class AuthorizeController implements AuthorizeControllerInterface
         $state = $request->query('state');
 
         // type and client_id are required
-        if (!$response_type || !in_array($response_type, array(self::RESPONSE_TYPE_AUTHORIZATION_CODE, self::RESPONSE_TYPE_ACCESS_TOKEN))) {
+        if (!$response_type || !in_array($response_type, $this->getValidResponseTypes())) {
             $response->setRedirect($this->config['redirect_status_code'], $redirect_uri, $state, 'invalid_request', 'Invalid or missing response type', null);
 
             return false;
@@ -189,9 +207,7 @@ class AuthorizeController implements AuthorizeControllerInterface
 
                 return false;
             }
-        }
-
-        if ($response_type == self::RESPONSE_TYPE_ACCESS_TOKEN) {
+        } else {
             if (!$this->config['allow_implicit']) {
                 $response->setRedirect($this->config['redirect_status_code'], $redirect_uri, $state, 'unsupported_response_type', 'implicit grant type not supported', null);
 
@@ -251,10 +267,8 @@ class AuthorizeController implements AuthorizeControllerInterface
     /**
      * Build the absolute URI based on supplied URI and parameters.
      *
-     * @param $uri
-     * An absolute URI.
-     * @param $params
-     * Parameters to be append as GET.
+     * @param $uri    An absolute URI.
+     * @param $params Parameters to be append as GET.
      *
      * @return
      * An absolute URI with supplied parameters.
@@ -287,14 +301,20 @@ class AuthorizeController implements AuthorizeControllerInterface
         ;
     }
 
+    protected function getValidResponseTypes()
+    {
+        return array(
+            self::RESPONSE_TYPE_ACCESS_TOKEN,
+            self::RESPONSE_TYPE_AUTHORIZATION_CODE,
+        );
+    }
+
     /**
      * Internal method for validating redirect URI supplied
      *
-     * @param string $inputUri
-     * The submitted URI to be validated
-     * @param string $registeredUriString
-     * The allowed URI(s) to validate against.  Can be a space-delimited string of URIs to
-     * allow for multiple URIs
+     * @param string $inputUri            The submitted URI to be validated
+     * @param string $registeredUriString The allowed URI(s) to validate against.  Can be a space-delimited string of URIs to
+     *                                    allow for multiple URIs
      *
      * @see http://tools.ietf.org/html/rfc6749#section-3.1.2
      */
@@ -304,7 +324,7 @@ class AuthorizeController implements AuthorizeControllerInterface
             return false; // if either one is missing, assume INVALID
         }
 
-        $registered_uris = explode(' ', $registeredUriString);
+        $registered_uris = preg_split('/\s+/', $registeredUriString);
         foreach ($registered_uris as $registered_uri) {
             if ($this->config['require_exact_redirect_uri']) {
                 // the input uri is validated against the registered uri using exact match

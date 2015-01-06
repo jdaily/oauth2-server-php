@@ -2,6 +2,9 @@
 
 namespace OAuth2\Storage;
 
+use OAuth2\OpenID\Storage\UserClaimsInterface;
+use OAuth2\OpenID\Storage\AuthorizationCodeInterface as OpenIDAuthorizationCodeInterface;
+
 /**
  * Simple PDO storage for all storage types
  *
@@ -14,14 +17,17 @@ namespace OAuth2\Storage;
  *
  * @author Brent Shaffer <bshafs at gmail dot com>
  */
-class Pdo implements AuthorizationCodeInterface,
+class Pdo implements
+    AuthorizationCodeInterface,
     AccessTokenInterface,
     ClientCredentialsInterface,
     UserCredentialsInterface,
     RefreshTokenInterface,
     JwtBearerInterface,
     ScopeInterface,
-    PublicKeyInterface
+    PublicKeyInterface,
+    UserClaimsInterface,
+    OpenIDAuthorizationCodeInterface
 {
     protected $db;
     protected $config;
@@ -29,8 +35,11 @@ class Pdo implements AuthorizationCodeInterface,
     public function __construct($connection, $config = array())
     {
         if (!$connection instanceof \PDO) {
+            if (is_string($connection)) {
+                $connection = array('dsn' => $connection);
+            }
             if (!is_array($connection)) {
-                throw new \InvalidArgumentException('First argument to OAuth2\Storage\Pdo must be an instance of PDO or a configuration array');
+                throw new \InvalidArgumentException('First argument to OAuth2\Storage\Pdo must be an instance of PDO, a DSN string, or a configuration array');
             }
             if (!isset($connection['dsn'])) {
                 throw new \InvalidArgumentException('configuration array must contain "dsn"');
@@ -39,8 +48,9 @@ class Pdo implements AuthorizationCodeInterface,
             $connection = array_merge(array(
                 'username' => null,
                 'password' => null,
+                'options' => array(),
             ), $connection);
-            $connection = new \PDO($connection['dsn'], $connection['username'], $connection['password']);
+            $connection = new \PDO($connection['dsn'], $connection['username'], $connection['password'], $connection['options']);
         }
         $this->db = $connection;
 
@@ -159,8 +169,13 @@ class Pdo implements AuthorizationCodeInterface,
         return $code;
     }
 
-    public function setAuthorizationCode($code, $client_id, $user_id, $redirect_uri, $expires, $scope = null)
+    public function setAuthorizationCode($code, $client_id, $user_id, $redirect_uri, $expires, $scope = null, $id_token = null)
     {
+        if (func_num_args() > 6) {
+            // we are calling with an id token
+            return call_user_func_array(array($this, 'setAuthorizationCodeWithIdToken'), func_get_args());
+        }
+
         // convert expires to datestring
         $expires = date('Y-m-d H:i:s', $expires);
 
@@ -172,6 +187,21 @@ class Pdo implements AuthorizationCodeInterface,
         }
 
         return $stmt->execute(compact('code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope'));
+    }
+
+    private function setAuthorizationCodeWithIdToken($code, $client_id, $user_id, $redirect_uri, $expires, $scope = null, $id_token = null)
+    {
+        // convert expires to datestring
+        $expires = date('Y-m-d H:i:s', $expires);
+
+        // if it exists, update it.
+        if ($this->getAuthorizationCode($code)) {
+            $stmt = $this->db->prepare($sql = sprintf('UPDATE %s SET client_id=:client_id, user_id=:user_id, redirect_uri=:redirect_uri, expires=:expires, scope=:scope, id_token =:id_token where authorization_code=:code', $this->config['code_table']));
+        } else {
+            $stmt = $this->db->prepare(sprintf('INSERT INTO %s (authorization_code, client_id, user_id, redirect_uri, expires, scope, id_token) VALUES (:code, :client_id, :user_id, :redirect_uri, :expires, :scope, :id_token)', $this->config['code_table']));
+        }
+
+        return $stmt->execute(compact('code', 'client_id', 'user_id', 'redirect_uri', 'expires', 'scope', 'id_token'));
     }
 
     public function expireAuthorizationCode($code)
@@ -194,6 +224,45 @@ class Pdo implements AuthorizationCodeInterface,
     public function getUserDetails($username)
     {
         return $this->getUser($username);
+    }
+
+    /* UserClaimsInterface */
+    public function getUserClaims($user_id, $claims)
+    {
+        if (!$userDetails = $this->getUserDetails($user_id)) {
+            return false;
+        }
+
+        $claims = explode(' ', trim($claims));
+        $userClaims = array();
+
+        // for each requested claim, if the user has the claim, set it in the response
+        $validClaims = explode(' ', self::VALID_CLAIMS);
+        foreach ($validClaims as $validClaim) {
+            if (in_array($validClaim, $claims)) {
+                if ($validClaim == 'address') {
+                    // address is an object with subfields
+                    $userClaims['address'] = $this->getUserClaim($validClaim, $userDetails['address'] ?: $userDetails);
+                } else {
+                    $userClaims = array_merge($userClaims, $this->getUserClaim($validClaim, $userDetails));
+                }
+            }
+        }
+
+        return $userClaims;
+    }
+
+    protected function getUserClaim($claim, $userDetails)
+    {
+        $userClaims = array();
+        $claimValuesString = constant(sprintf('self::%s_CLAIM_VALUES', strtoupper($claim)));
+        $claimValues = explode(' ', $claimValuesString);
+
+        foreach ($claimValues as $value) {
+            $userClaims[$value] = isset($userDetails[$value]) ? $userDetails[$value] : null;
+        }
+
+        return $userClaims;
     }
 
     /* OAuth2\Storage\RefreshTokenInterface */
@@ -267,8 +336,9 @@ class Pdo implements AuthorizationCodeInterface,
     public function scopeExists($scope)
     {
         $scope = explode(' ', $scope);
-        $stmt = $this->db->prepare(sprintf('SELECT count(scope) as count FROM %s WHERE scope IN ("%s")', $this->config['scope_table'], implode('","', $scope)));
-        $stmt->execute();
+        $whereIn = implode(',', array_fill(0, count($scope), '?'));
+        $stmt = $this->db->prepare(sprintf('SELECT count(scope) as count FROM %s WHERE scope IN (%s)', $this->config['scope_table'], $whereIn));
+        $stmt->execute($scope);
 
         if ($result = $stmt->fetch()) {
             return $result['count'] == count($scope);
@@ -318,7 +388,7 @@ class Pdo implements AuthorizationCodeInterface,
 
     public function getJti($client_id, $subject, $audience, $expires, $jti)
     {
-        $stmt = $this->db->prepare($sql = sprintf('SELECT* FROM %s WHERE issuer=:client_id AND subject=:subject AND audience=:audience AND expires=:expires AND jti=:jti', $this->config['jti_table']));
+        $stmt = $this->db->prepare($sql = sprintf('SELECT * FROM %s WHERE issuer=:client_id AND subject=:subject AND audience=:audience AND expires=:expires AND jti=:jti', $this->config['jti_table']));
 
         $stmt->execute(compact('client_id', 'subject', 'audience', 'expires', 'jti'));
 
@@ -373,5 +443,85 @@ class Pdo implements AuthorizationCodeInterface,
         }
 
         return 'RS256';
+    }
+
+    /**
+     * DDL to create OAuth2 database and tables for PDO storage
+     *
+     * @see https://github.com/dsquier/oauth2-server-php-mysql
+     */
+    public function getBuildSql($dbName = 'oauth2_server_php')
+    {
+        $sql = "
+        CREATE TABLE {$this->config['client_table']} (
+          client_id             VARCHAR(80)   NOT NULL,
+          client_secret         VARCHAR(80)   NOT NULL,
+          redirect_uri          VARCHAR(2000),
+          grant_types           VARCHAR(80),
+          scope                 VARCHAR(4000),
+          user_id               VARCHAR(80),
+          PRIMARY KEY (client_id)
+        );
+
+        CREATE TABLE {$this->config['access_token_table']} (
+          access_token         VARCHAR(40)    NOT NULL,
+          client_id            VARCHAR(80)    NOT NULL,
+          user_id              VARCHAR(80),
+          expires              TIMESTAMP      NOT NULL,
+          scope                VARCHAR(4000),
+          PRIMARY KEY (access_token)
+        );
+
+        CREATE TABLE {$this->config['code_table']} (
+          authorization_code  VARCHAR(40)    NOT NULL,
+          client_id           VARCHAR(80)    NOT NULL,
+          user_id             VARCHAR(80),
+          redirect_uri        VARCHAR(2000),
+          expires             TIMESTAMP      NOT NULL,
+          scope               VARCHAR(4000),
+          id_token            VARCHAR(1000),
+          PRIMARY KEY (authorization_code)
+        );
+
+        CREATE TABLE {$this->config['refresh_token_table']} (
+          refresh_token       VARCHAR(40)    NOT NULL,
+          client_id           VARCHAR(80)    NOT NULL,
+          user_id             VARCHAR(80),
+          expires             TIMESTAMP      NOT NULL,
+          scope               VARCHAR(4000),
+          PRIMARY KEY (refresh_token)
+        );
+
+        CREATE TABLE {$this->config['user_table']} (
+          username            VARCHAR(80),
+          password            VARCHAR(80),
+          first_name          VARCHAR(80),
+          last_name           VARCHAR(80),
+          email               VARCHAR(80),
+          email_verified      BOOLEAN,
+          scope               VARCHAR(4000)
+        );
+
+        CREATE TABLE {$this->config['scope_table']} (
+          scope               VARCHAR(80)  NOT NULL,
+          is_default          BOOLEAN,
+          PRIMARY KEY (scope)
+        );
+
+        CREATE TABLE {$this->config['jwt_table']} (
+          client_id           VARCHAR(80)   NOT NULL,
+          subject             VARCHAR(80),
+          public_key          VARCHAR(2000) NOT NULL
+        );
+
+        CREATE TABLE {$this->config['public_key_table']} (
+          client_id            VARCHAR(80),
+          public_key           VARCHAR(2000),
+          private_key          VARCHAR(2000),
+          encryption_algorithm VARCHAR(100) DEFAULT 'RS256'
+        )
+";
+
+        return $sql;
     }
 }

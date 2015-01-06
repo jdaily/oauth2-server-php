@@ -180,12 +180,14 @@ class Response implements ResponseInterface
             case 'xml':
                 // this only works for single-level arrays
                 $xml = new \SimpleXMLElement('<response/>');
-                array_walk($this->parameters, array($xml, 'addChild'));
+                foreach ($this->parameters as $key => $param) {
+                    $xml->addChild($key, $param);
+                }
 
                 return $xml->asXML();
         }
 
-        throw new \InvalidArgumentException(sprintf('The format %s is not supported'));
+        throw new \InvalidArgumentException(sprintf('The format %s is not supported', $format));
 
     }
 
@@ -241,7 +243,7 @@ class Response implements ResponseInterface
         }
     }
 
-    public function setRedirect($statusCode = 302, $url, $state = null, $error = null, $errorDescription = null, $errorUri = null)
+    public function setRedirect($statusCode, $url, $state = null, $error = null, $errorDescription = null, $errorUri = null)
     {
         if (empty($url)) {
             throw new \InvalidArgumentException('Cannot redirect to an empty URL.');
