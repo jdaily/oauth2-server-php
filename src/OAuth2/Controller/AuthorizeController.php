@@ -56,7 +56,7 @@ class AuthorizeController implements AuthorizeControllerInterface
         $this->scopeUtil = $scopeUtil;
     }
 
-    public function handleAuthorizeRequest(RequestInterface $request, ResponseInterface $response, $is_authorized, $user_id = null)
+    public function handleAuthorizeRequest(RequestInterface $request, ResponseInterface $response, $is_authorized, $user_id = null, $json_response = false)
     {
         if (!is_bool($is_authorized)) {
             throw new \InvalidArgumentException('Argument "is_authorized" must be a boolean.  This method must know if the user has granted access to the client.');
@@ -88,17 +88,22 @@ class AuthorizeController implements AuthorizeControllerInterface
         }
 
         $authResult = $this->responseTypes[$this->response_type]->getAuthorizeResponse($params, $user_id);
-
+        
         list($redirect_uri, $uri_params) = $authResult;
 
-        if (empty($redirect_uri) && !empty($registered_redirect_uri)) {
-            $redirect_uri = $registered_redirect_uri;
+        if ($json_response === true) {
+            echo json_encode($uri_params['fragment']);
+        } else {
+            
+            if (empty($redirect_uri) && !empty($registered_redirect_uri)) {
+                $redirect_uri = $registered_redirect_uri;
+            }
+
+            $uri = $this->buildUri($redirect_uri, $uri_params);
+
+            // return redirect response
+            $response->setRedirect($this->config['redirect_status_code'], $uri);
         }
-
-        $uri = $this->buildUri($redirect_uri, $uri_params);
-
-        // return redirect response
-        $response->setRedirect($this->config['redirect_status_code'], $uri);
     }
 
     protected function setNotAuthorizedResponse(RequestInterface $request, ResponseInterface $response, $redirect_uri, $user_id = null)
